@@ -1,14 +1,34 @@
 """Cloudera AI Workbench management application for the standalone MCP server."""
 import os
+import sys
 from collections import Counter
+from pathlib import Path
 
 import uvicorn
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
-from governed_iceberg_mcp.observability import State
-from governed_iceberg_mcp.settings import Settings
+
+def project_root():
+    current = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+    candidates = []
+    if os.getenv("GOVERNED_MCP_ROOT"):
+        candidates.append(Path(os.environ["GOVERNED_MCP_ROOT"]))
+    candidates.extend([current, *current.parents])
+    for candidate in candidates:
+        if (candidate / "governed_iceberg_mcp" / "__init__.py").is_file():
+            return candidate
+    raise RuntimeError(
+        "Cannot find governed_iceberg_mcp from "
+        f"{current}; set GOVERNED_MCP_ROOT to the project directory"
+    )
+
+
+sys.path.insert(0, str(project_root()))
+
+from governed_iceberg_mcp.observability import State  # noqa: E402
+from governed_iceberg_mcp.settings import Settings  # noqa: E402
 
 
 PAGE = """<!doctype html>
