@@ -21,6 +21,7 @@ from starlette.routing import Mount, Route
 from . import __version__, tools
 from .auth import AuthMiddleware, Verifier, resource_metadata
 from .impala import Impala
+from .observability import ControlLoop, State
 from .settings import Settings
 
 log = logging.getLogger("governed-mcp")
@@ -31,15 +32,19 @@ def build_app(settings, impala=None, verifier=None):
     problems = settings.check()
     if problems:
         raise SystemExit("Configuration problems:\n  - " + "\n  - ".join(problems))
-    impala = impala or Impala(settings)
+    state = State(settings)
+    impala = impala or Impala(settings, state=state)
     verifier = verifier or (Verifier(settings) if settings.auth_mode == "knox" else None)
+    control = ControlLoop(state, verifier, impala)
+    state.update(status="ready", version=__version__, auth_mode=settings.auth_mode,
+        warehouse=f"{settings.impala_host}:{settings.impala_port}")
     mcp = FastMCP(name="Governed Iceberg MCP", version=__version__, instructions=(
         "Read-only access to Iceberg tables through Impala. Every call runs as the signed-in user, so results reflect "
         "that user's Ranger policies. Start with list_databases and get_schema to find tables, describe_table for "
         "columns, then execute_query."))
     tools.register(mcp, impala, settings)
     mcp_app = mcp.http_app(path="/mcp", stateless_http=True, transport="streamable-http",
-        middleware=[Middleware(AuthMiddleware, settings=settings, verifier=verifier, log=log)])
+        middleware=[Middleware(AuthMiddleware, settings=settings, verifier=verifier, log=log, state=state)])
 
     async def healthz(request):
         return JSONResponse({"status": "ok", "service": "governed-iceberg-mcp", "version": __version__, "auth_mode": settings.auth_mode,
@@ -48,8 +53,14 @@ def build_app(settings, impala=None, verifier=None):
     async def well_known(request):
         return JSONResponse(resource_metadata(settings))
 
+    async def lifespan(app):
+        control.start()
+        async with mcp_app.lifespan(app):
+            yield
+        control.stop()
+
     return Starlette(routes=[Route("/healthz", healthz), Route("/.well-known/oauth-protected-resource", well_known), Mount("/", app=mcp_app)],
-        lifespan=mcp_app.lifespan)
+        lifespan=lifespan)
 
 
 def main():

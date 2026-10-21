@@ -104,3 +104,25 @@ identity (`MCP_KEYTAB`, `MCP_PRINC`, `KINIT_INTERVAL_SECONDS`), and serving (`MC
 - **Health.** `GET /healthz` needs no token and reports version, auth mode, warehouse and start time.
 - **Not included.** Token minting (Knox does it), writes, Keycloak introspection (a possible second auth
   mode), result pagination and query cancellation.
+
+## Management and monitoring application
+
+The management_app.py file is a companion Cloudera AI Workbench application. Run it as a second application in the
+same project, with Workbench authentication enabled and the same MCP_STATE_DIR as the MCP server. Do not enable
+bypass authentication for the management application.
+
+The MCP writes a redacted status.json and append-only events.jsonl to MCP_STATE_DIR. The management application renders
+service health, query/auth activity, recent events, Kerberos status, and operational buttons for JWKS refresh, Kerberos
+renewal, and maintenance mode. Commands are written to actions.jsonl and consumed by the MCP process.
+
+Set MANAGEMENT_ADMIN_USERS for explicit operators, or allow Workbench users with REMOTE-USER-PERM=RW or ADMIN. The
+application can be visualized with an embedded dashboard now; the event files are also a straightforward source for a
+later Prometheus/OpenTelemetry exporter. The management application does not administer Ranger, Knox, CDW virtual
+warehouses, or Workbench itself.
+
+Create the second Workbench application with:
+
+    Script: management_app.py
+    Port: CDSW_APP_PORT
+    Authentication: enabled
+    Environment: MCP_STATE_DIR=<the same shared project-storage directory>

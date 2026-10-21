@@ -102,6 +102,10 @@ def test_only_read_only_statements_pass_the_guard():
         with pytest.raises(ValueError):
             read_only(sql)
     assert read_only("WITH x AS (SELECT 1) SELECT * FROM x").startswith("WITH")
+    for sql in ("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x", "WITH x AS (SELECT 1) UPDATE t SET a = 1",
+                "WITH x AS (SELECT 1) DELETE FROM t"):
+        with pytest.raises(ValueError):
+            read_only(sql)
 
 
 def test_development_mode_trusts_the_configured_user(settings, monkeypatch):

@@ -44,6 +44,7 @@ class Settings:
     principal: str = field(default_factory=lambda: os.getenv("MCP_PRINC", ""))
     kinit_interval: int = field(default_factory=lambda: int(os.getenv("KINIT_INTERVAL_SECONDS", str(6 * 3600))))
     ccache_dir: str = field(default_factory=lambda: os.getenv("KRB5_CCACHE_DIR", os.path.join(os.path.expanduser("~"), ".governed-mcp")))
+    state_dir: str = field(default_factory=lambda: os.getenv("MCP_STATE_DIR", os.path.join(os.path.expanduser("~"), ".governed-mcp")))
 
     # ── Results. ──
     default_limit: int = field(default_factory=lambda: int(os.getenv("QUERY_DEFAULT_LIMIT", "500")))

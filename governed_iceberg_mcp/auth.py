@@ -61,8 +61,8 @@ def resource_metadata(settings):
 class AuthMiddleware:
     """Pure ASGI middleware around the MCP endpoint: no valid bearer token, no MCP."""
 
-    def __init__(self, app, settings, verifier, log):
-        self.app, self.settings, self.verifier, self.log = app, settings, verifier, log
+    def __init__(self, app, settings, verifier, log, state=None):
+        self.app, self.settings, self.verifier, self.log, self.state = app, settings, verifier, log, state
         self.well_known = (settings.public_url or "") + "/.well-known/oauth-protected-resource"
 
     async def __call__(self, scope, receive, send):
@@ -73,13 +73,21 @@ class AuthMiddleware:
         else:
             header = next((v.decode() for k, v in scope["headers"] if k == b"authorization"), "")
             if not header.lower().startswith("bearer "):
+                if self.state:
+                    self.state.event("auth_rejected", reason="missing_bearer")
                 return await self.reject(scope, receive, send, "missing Knox bearer token")
             started = time.monotonic()
             try:
                 user = self.verifier.verify(header.split(None, 1)[1].strip())
             except Exception as exc:  # any verification failure is a 401; the reason goes to the log, not the client
                 self.log.warning("token rejected after %.2fs: %s", time.monotonic() - started, exc)
+                if self.state:
+                    self.state.event("auth_rejected", reason="invalid_bearer")
                 return await self.reject(scope, receive, send, "invalid Knox token")
+            if self.state:
+                self.state.event("auth_succeeded", user=user)
+                if self.state.snapshot().get("maintenance"):
+                    return await self.unavailable(scope, receive, send)
         token = current_user.set(user)
         try:
             await self.app(scope, receive, send)
@@ -89,4 +97,9 @@ class AuthMiddleware:
     async def reject(self, scope, receive, send, reason):
         response = JSONResponse({"error": reason}, status_code=401,
             headers={"WWW-Authenticate": f'Bearer resource_metadata="{self.well_known}"'})
+        await response(scope, receive, send)
+
+    async def unavailable(self, scope, receive, send):
+        response = JSONResponse({"error": "MCP is in maintenance mode"}, status_code=503,
+            headers={"Retry-After": "30"})
         await response(scope, receive, send)

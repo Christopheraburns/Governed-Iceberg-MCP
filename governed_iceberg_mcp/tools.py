@@ -10,6 +10,55 @@ from .auth import current_user
 
 READ_ONLY = ("select", "show", "describe", "desc", "with", "explain")
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+WITH_STATEMENT = re.compile(r"\b(select|insert|update|delete|upsert|merge|create|alter|drop|truncate|load|refresh|invalidate|compute)\b", re.IGNORECASE)
+
+
+def _with_body_keyword(statement):
+    """Return the first top-level statement keyword after a WITH clause.
+
+    Impala permits a WITH clause before INSERT, so checking only the first
+    keyword is insufficient for a read-only guard. This is intentionally a
+    small lexical scan, not a SQL parser: it tracks parentheses, quoted
+    strings, and comments so keywords inside CTEs do not count.
+    """
+    depth = 0
+    index = 4  # len("with")
+    length = len(statement)
+    while index < length:
+        char = statement[index]
+        if char in "'\"`":
+            quote = char
+            index += 1
+            while index < length:
+                if statement[index] == quote:
+                    if index + 1 < length and statement[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "-" and index + 1 < length and statement[index + 1] == "-":
+            newline = statement.find("\n", index + 2)
+            index = length if newline < 0 else newline + 1
+            continue
+        if char == "/" and index + 1 < length and statement[index + 1] == "*":
+            end = statement.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        match = WITH_STATEMENT.match(statement, index) if depth == 0 else None
+        if match:
+            return match.group(1).lower()
+        index += 1
+    return None
 
 
 def read_only(sql):
@@ -18,8 +67,11 @@ def read_only(sql):
         raise ValueError("The query is empty")
     if ";" in statement:
         raise ValueError("One statement per call")
-    if statement.split(None, 1)[0].lower() not in READ_ONLY:
+    first = statement.split(None, 1)[0].lower()
+    if first not in READ_ONLY:
         raise ValueError("Only read-only statements are allowed: " + ", ".join(k.upper() for k in READ_ONLY))
+    if first == "with" and _with_body_keyword(statement) != "select":
+        raise ValueError("WITH statements must contain a top-level SELECT")
     return statement
 
 

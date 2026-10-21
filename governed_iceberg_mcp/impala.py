@@ -16,6 +16,8 @@ from urllib.parse import quote
 
 from impala.dbapi import connect
 
+from .observability import query_fingerprint
+
 log = logging.getLogger("governed-mcp.impala")
 
 
@@ -42,8 +44,9 @@ class Kerberos:
 
 
 class Impala:
-    def __init__(self, settings):
+    def __init__(self, settings, state=None):
         self.settings = settings
+        self.state = state
         self.kerberos = Kerberos(settings) if settings.impala_auth == "GSSAPI" else None
 
     def http_path(self, user):
@@ -81,6 +84,15 @@ class Impala:
             result = {"columns": columns, "rows": [list(r) for r in rows[:limit]], "row_count": min(len(rows), limit), "truncated": truncated,
                 "duration_ms": int((time.monotonic() - started) * 1000)}
             cursor.close()
+            if self.state:
+                self.state.event("query_succeeded", user=user, fingerprint=query_fingerprint(sql), rows=result["row_count"],
+                    truncated=result["truncated"], duration_ms=result["duration_ms"])
             return result
+        except Exception as exc:
+            if self.state:
+                self.state.event("query_failed", user=user, fingerprint=query_fingerprint(sql),
+                    duration_ms=int((time.monotonic() - started) * 1000), error=str(exc)[:300])
+            raise
         finally:
-            connection.close()
+            if "connection" in locals():
+                connection.close()
