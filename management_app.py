@@ -40,6 +40,7 @@ body{font:15px system-ui,sans-serif;background:#f5f7fb;color:#172033;max-width:1
 h1{margin-bottom:4px}.muted{color:#667085}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:20px 0}
 section,.card{background:white;border:1px solid #dfe5ee;border-radius:10px;padding:16px;box-shadow:0 1px 2px #0000000d}
 .value{font-size:26px;font-weight:700;margin-top:6px}.ok{color:#067647}.bad{color:#b42318}.warn{color:#b54708}
+#cards .card:nth-child(2) .value{font-size:14px;line-height:1.35;overflow-wrap:anywhere;font-weight:600}
 button{border:0;border-radius:6px;padding:9px 12px;margin:4px;background:#175cd3;color:white;cursor:pointer}button.secondary{background:#667085}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #eaecf0;font-size:13px}code{font-size:12px}
 </style></head><body>
