@@ -1,6 +1,8 @@
 """Cloudera AI Workbench management application for the standalone MCP server."""
 import os
 import sys
+import asyncio
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -102,4 +104,19 @@ def build_app(settings=None):
 
 if __name__ == "__main__":
     settings = Settings()
-    uvicorn.run(build_app(settings), host=settings.bind, port=settings.port, log_level="info")
+    application = build_app(settings)
+
+    def serve():
+        uvicorn.run(application, host=settings.bind, port=settings.port, log_level="info")
+
+    # Cloudera Workbench executes application scripts from an IPython kernel,
+    # which already owns an asyncio event loop. Uvicorn's synchronous helper
+    # cannot call asyncio.run() from that thread, so serve in a dedicated one.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        serve()
+    else:
+        server_thread = threading.Thread(target=serve, name="management-uvicorn", daemon=False)
+        server_thread.start()
+        server_thread.join()
