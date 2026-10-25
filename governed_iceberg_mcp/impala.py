@@ -27,7 +27,9 @@ class Kerberos:
     def __init__(self, settings):
         self.settings = settings
         self.lock = threading.Lock()
-        self.obtained = 0.0
+        # -inf, not 0.0: time.monotonic() is host uptime, so 0.0 looks "recent" on a freshly-booted
+        # host (uptime < kinit_interval) and the guard below would skip the very first kinit.
+        self.obtained = float("-inf")
         os.makedirs(settings.ccache_dir, mode=0o700, exist_ok=True)
         os.environ["KRB5CCNAME"] = "FILE:" + os.path.join(settings.ccache_dir, f"krb5cc_mcp_{os.getpid()}")
 

@@ -58,3 +58,21 @@ def test_a_stale_ticket_is_renewed_once_and_the_query_retried(settings, monkeypa
     monkeypatch.setattr(module, "connect", connect)
     assert Impala(settings).run("analyst1", "SELECT 1", 5)["row_count"] == 1
     assert len(attempts) == 2 and len(kinits) == 2  # one at first use, one forced renewal
+
+
+def test_first_kinit_runs_on_a_freshly_booted_host(settings, monkeypatch):
+    """A kinit must happen on first use (see test_a_stale_ticket_is_renewed_once: 'one at first use').
+
+    Kerberos.ensure() starts self.obtained = 0.0 and guards with
+    `time.monotonic() - self.obtained < kinit_interval`. Because time.monotonic() tracks host
+    uptime (CLOCK_MONOTONIC), on a host whose uptime is below kinit_interval (default 21600s / 6h)
+    the first call returns WITHOUT kinit -> no credential cache -> the first query fails with
+    GSSError "No Kerberos credentials available". Long-up CI hosts hide it (monotonic > interval).
+    This pins the first kinit regardless of host uptime by faking a freshly-booted host.
+    """
+    monkeypatch.setattr(module.time, "monotonic", lambda: 10.0)  # host up 10s  <<  default 21600s
+    kinits = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: kinits.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(module, "connect", lambda **kw: FakeConnection([[1, "x"]]))
+    Impala(settings).run("analyst1", "SELECT 1", 5)
+    assert kinits, "ensure() skipped the first kinit on a low-uptime host (no ccache -> GSSError at query time)"
