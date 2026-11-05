@@ -93,6 +93,118 @@ identity (`MCP_KEYTAB`, `MCP_PRINC`, `KINIT_INTERVAL_SECONDS`), and serving (`MC
 `QUERY_*_LIMIT`). `IMPALA_AUTH_MECHANISM=LDAP` with a service account is supported for development; with
 `IMPALA_IMPERSONATE=true` it still sends `doAs`, which works only if that account is an authorized proxy.
 
+## Authorization model
+
+The MCP does not authorize anything itself. It establishes *who* is calling, propagates that identity to Impala,
+and leaves every allow/deny decision to Ranger. The read-only check in `tools.py` guards against accidents; it is
+not a security boundary. Two independent layers each have a switch:
+
+| Layer | Setting | Options |
+|---|---|---|
+| Caller identity: who the agent acts for | `AUTH_MODE` | `knox` (production) or `development` |
+| Warehouse connection: how the MCP reaches Impala | `IMPALA_AUTH_MECHANISM` + `IMPALA_IMPERSONATE` | `GSSAPI` or `LDAP`, impersonation on or off |
+
+The management application uses a third, separate scheme (see below).
+
+### Caller identity
+
+**`AUTH_MODE=knox` — Knox JWT bearer token (production).** The client sends `Authorization: Bearer <KNOXTOKEN>`.
+`AuthMiddleware` verifies it offline: RS256 signature against Knox's JWKS (cached, refetched on an unknown `kid`),
+`iss`, `exp`, and `aud` when `KNOX_AUD` is set. `sub` becomes the user and travels to the tools in a context
+variable, so tools never see the token. Any failure is a fail-closed 401 carrying
+`WWW-Authenticate: Bearer resource_metadata=...`, and `/.well-known/oauth-protected-resource` (RFC 9728) tells
+clients where tokens are minted. The MCP never mints tokens; Knox does, after a SPNEGO or LDAP login against the
+token topology. Keys come from `KNOX_JWKS_URL`, or from `KNOX_JWKS_FILE` on air-gapped hosts that cannot reach
+Knox at runtime.
+
+Use it when:
+- An analyst in n8n, Copilot or Claude asks questions of `sales.orders` and must only see her region's rows. She
+  runs `kinit`, fetches a Knox token, and every query runs as her; Ranger's row filter does the rest, and the
+  audit log shows her name rather than a service account.
+- One "data copilot" is deployed for a whole department whose members have different column-masking policies.
+  One deployment, per-user results, nothing per-user to configure on the MCP.
+
+**`AUTH_MODE=development` — trust `DEV_USER`.** No token is checked; every request is treated as `DEV_USER`
+and the server logs a warning at startup. Use it for local wiring tests without a cluster, or to reproduce a
+Ranger policy problem as a specific user (`DEV_USER=analyst1`) against a dev warehouse. Never expose it beyond
+a private network.
+
+### Warehouse connection
+
+**`IMPALA_AUTH_MECHANISM=GSSAPI` with `IMPALA_IMPERSONATE=true` (the intended production pairing).** The server
+keeps a ticket for `MCP_PRINC` in a private credential cache (`kinit -kt` at startup, every
+`KINIT_INTERVAL_SECONDS`, and once more after a GSSAPI failure), opens one impyla connection per request, and
+passes `cliservice?doAs=<user>`. The proxy's short name must be in the virtual warehouse's
+`--authorized_proxy_user_config`. This is the delegation mechanism Knox and the Impala JDBC driver use, so it
+is version-independent. Use it on any Kerberized CDW deployment where per-user Ranger enforcement is the goal,
+which is the point of this project.
+
+**`IMPALA_AUTH_MECHANISM=LDAP` — service account.** Connects with `IMPALA_USER` / `IMPALA_PASSWORD`.
+Impersonation can stay on (it works only if that LDAP account is an authorized proxy) or be turned off. Use it:
+- In development against a non-Kerberized or LDAP-only warehouse where no keytab is available.
+- With `IMPALA_IMPERSONATE=false` for a deliberately ungoverned deployment where every caller should see exactly
+  what one service account sees, such as a sanitized reference dataset. `whoami` reports
+  `none: queries run as the service account ...` in that case, so nobody mistakes it for governed access.
+
+### Management application
+
+`management_app.py` runs with Workbench authentication *enabled*, so Workbench's own login applies and the app
+reads the `REMOTE-USER` and permission headers. Operators must be listed in `MANAGEMENT_ADMIN_USERS` or hold
+RW/ADMIN project permission. It controls the MCP process (JWKS refresh, Kerberos renewal, maintenance mode)
+and does not administer Ranger, Knox or the warehouse.
+
+### Known weakness
+
+Offline verification cannot revoke a still-valid token: a stolen token works until it expires. Keep Knox token
+TTLs short or enable server-managed tokens. A per-request introspection call, or a short-lived cache of a
+revocation list, would close the gap.
+
+### OAuth 1 and OAuth 2
+
+Neither is supported. `AUTH_MODE` accepts only `knox` and `development`, and the verifier is Knox-specific
+(RS256, `iss=KNOXSSO`, `sub` taken as the raw username).
+
+**OAuth 1.0a** should not be added. It is a request-signing scheme (HMAC over request parameters with a consumer
+secret) from before TLS was universal; it is effectively deprecated, no MCP client implements it, and the MCP
+authorization specification is built on OAuth 2.1 bearer tokens. Supporting it would mean per-request signature
+verification for a client population of zero.
+
+**OAuth 2.0 / 2.1** is a natural extension, and the scaffolding is half there: bearer-in-header, RFC 9728
+resource metadata and the `WWW-Authenticate` challenge are exactly what the MCP spec expects of a resource
+server. Two levels of ambition:
+
+1. *Accept OIDC/OAuth 2 access tokens from an enterprise IdP* (Keycloak, Okta, Entra ID). This is a second
+   `Verifier` with its own JWKS URL, issuer and audience, plus a claim-mapping rule
+   (`preferred_username` / `email` / `upn` → the Ranger username). An `AUTH_MODE=oidc`, or a list of trusted
+   issuers keyed by `iss`, lets one deployment accept both Knox and IdP tokens. Introspection (RFC 7662) against
+   the IdP would also address the revocation weakness above. The hard requirement is that the IdP identity resolve
+   to the principal Ranger knows, which usually holds in CDP because both sit on the same LDAP/AD.
+2. *Full MCP-spec OAuth 2.1* so clients such as Claude Desktop or Cursor can run the interactive login
+   themselves: PKCE, dynamic or pre-registered clients, and `authorization_servers` in the well-known document
+   pointing at a real authorization server rather than Knox's mint URL. Downstream nothing changes: `doAs` needs
+   only a username, so no token exchange is required unless the proxy keytab is to be replaced by per-user Knox
+   delegation tokens.
+
+Option 1 is a few dozen lines and should come first.
+
+### When this server is the wrong choice
+
+- **Autonomous or scheduled agents with no human principal.** The model assumes a person obtained a Knox token
+  through their own Kerberos or LDAP login and the agent acts on their behalf. A nightly data-quality agent, a
+  Slack bot answering a channel, or a multi-tenant SaaS front end has no calling user in the cluster's identity
+  domain. The options are sharing one human's token (an audit and revocation problem) or
+  `IMPALA_IMPERSONATE=false`, which runs everything as the proxy account and discards the governance that
+  justifies the server. Those workloads need a dedicated service identity with its own Ranger policies, or a
+  purpose-built server with narrower tools.
+- **Write, ETL or heavy analytical workloads.** The server is read-only, caps results at `QUERY_MAX_LIMIT`
+  (default 5,000) rows, has no pagination or query cancellation, and opens a fresh HS2 connection per call. An
+  agent that needs to materialize a table, run a 30-minute scan or stream a large extract will hit every one of
+  those limits. Spark, NiFi or direct Impala JDBC are the right tools; an agent in the loop should orchestrate
+  them rather than query through this MCP.
+- **Iceberg that is not behind Knox, Impala and Ranger.** The identity-propagation trick is HS2 `doAs`
+  specific. Tables reached through a REST catalog and Trino, Snowflake or Athena have none of these pieces, so
+  nothing here transfers.
+
 ## Operational notes
 
 - **Token lifetime.** Offline verification cannot revoke a still-valid token. Keep Knox token TTLs short, or
